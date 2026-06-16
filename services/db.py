@@ -2,8 +2,8 @@ import os
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
 from dotenv import load_dotenv
+from contextlib import contextmanager
 
-# .envの読み込み
 load_dotenv()
 
 class DatabaseService:
@@ -12,16 +12,24 @@ class DatabaseService:
     @classmethod
     def get_pool(cls):
         if cls._pool is None:
+            # DATABASE_URLは環境変数から取得（neon等の接続文字列を想定）
             cls._pool = SimpleConnectionPool(
                 1, 10,
                 dsn=os.getenv("DATABASE_URL")
             )
         return cls._pool
 
+    @contextmanager
     @classmethod
-    def get_connection(cls):
-        return cls.get_pool().getconn()
-
-    @classmethod
-    def release_connection(cls, conn):
-        cls.get_pool().putconn(conn)
+    def connection(cls):
+        """with句で接続を安全に取得・解放する"""
+        pool = cls.get_pool()
+        conn = pool.getconn()
+        try:
+            yield conn
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            pool.putconn(conn)
