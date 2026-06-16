@@ -5,6 +5,8 @@ from components import create_model_card, create_edit_modal
 from services import DatabaseService
 
 def main(page: ft.Page):
+    # assetsディレクトリの指定
+    page.assets_dir = "assets"  # type: ignore
     page.title = "App Dashboard"
     page.theme_mode = ft.ThemeMode.LIGHT
 
