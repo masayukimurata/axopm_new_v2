@@ -1,28 +1,35 @@
 import flet as ft
-import time
-from models import Recipe, RecipeIngredient, MerchandisePro
+from models.base import get_registered_models
+from components.cards import create_model_card
 
 def main(page: ft.Page):
     page.title = "App Dashboard"
     page.theme_mode = ft.ThemeMode.LIGHT
 
-    def create_dashboard():
-        return ft.GridView(
-            controls=[
-                ft.Card(content=ft.Container(content=ft.Text("レシピ一覧"), padding=20)),
-                ft.Card(content=ft.Container(content=ft.Text("商材マスター"), padding=20))
-            ],
-            runs_count=2,
-            max_extent=300
+    # 登録モデル一覧からカードを生成
+    grid_items = []
+    for model_cls in get_registered_models():
+        label = getattr(model_cls, "_label", model_cls.__name__)
+        icon = getattr(model_cls, "_icon", "table_chart")
+
+        grid_items.append(
+            create_model_card(
+                title=label,
+                icon=icon,
+                on_click=lambda e: print(f"{label} clicked")
+            )
         )
 
     page.add(
         ft.Text("ダッシュボード", size=30, weight=ft.FontWeight.BOLD),
-        create_dashboard()
+        ft.GridView(
+            controls=grid_items,
+            runs_count=2,
+            max_extent=300,
+            spacing=10,
+        )
     )
-
     page.update()
 
-# Flet実行時のキャッシュ対策クエリ付与は、外部URLアクセス時に利用
 if __name__ == "__main__":
     ft.app(target=main, view=ft.AppView.WEB_BROWSER)

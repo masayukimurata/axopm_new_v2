@@ -1,4 +1,4 @@
-from typing import Type, Dict, Any
+from typing import Type, Dict, Any, List
 
 # モデルを登録するためのグローバルレジストリ
 MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {}
@@ -6,7 +6,6 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {}
 def register_model(label: str, icon: str):
     """
     モデルを自動的に管理メニューへ登録するためのメタデコレータ
-    使用例: @register_model(label="レシピ一覧", icon="book")
     """
     def decorator(cls: Type):
         MODEL_REGISTRY[cls.__name__] = {
@@ -14,8 +13,15 @@ def register_model(label: str, icon: str):
             "label": label,
             "icon": icon
         }
+        # クラス自体にもメタデータを付与してアクセスしやすくする
+        setattr(cls, "_label", label)
+        setattr(cls, "_icon", icon)
         return cls
     return decorator
+
+def get_registered_models() -> List[Type]:
+    """登録されたモデルクラスのリストを返す"""
+    return [item["model"] for item in MODEL_REGISTRY.values()]
 
 class BaseModel:
     """
