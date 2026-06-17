@@ -17,3 +17,5 @@ env/
 # Flet / Web artifacts
 .flet/
 .tmp/
+
+.doc
