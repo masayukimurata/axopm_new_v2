@@ -1,75 +1,58 @@
 import flet as ft
 from typing import cast, Type
 from models.base import get_registered_models, BaseModel
-from components import create_model_card, create_edit_modal
+from components import create_model_card, create_edit_modal, create_sidebar
 from services import DatabaseService
 
 def main(page: ft.Page):
-    # assetsディレクトリの指定（型チェックを回避）
     page.assets_dir = "assets"  # type: ignore
-    page.title = "App Dashboard"
-    page.theme_mode = ft.ThemeMode.LIGHT
+    page.title = "Merchandise Manager"
+    page.theme_mode = ft.ThemeMode.DARK  # 画像に合わせダークモードへ
+    page.padding = 0
 
-    # 【汎用DB登録エンジン】
-    # モデルクラスを引数として受け取り、メタデータから自動的にテーブルを決定
-    def save_to_db(name: str, memo: str, model_cls: Type[BaseModel]):
-        table_name = getattr(model_cls, "_table_name", "t_merchandise_pro")
-        try:
-            with DatabaseService.connection() as conn:
-                with conn.cursor() as cur:
-                    # モデル定義に基づいた汎用INSERT
-                    cur.execute(
-                        f"INSERT INTO {table_name} (m_name, note) VALUES (%s, %s)",
-                        (name, memo)
-                    )
-            print(f"DB Saved to {table_name}: {name}")
+    # 画面制御用コンテナ
+    main_content = ft.Container(content=ft.Text("読み込み中..."), expand=True, padding=20)
 
-            # 安全にモーダルを閉じる
-            if page.dialog:
-                alert_dlg = cast(ft.AlertDialog, page.dialog)
-                alert_dlg.open = False
-                page.update()
-        except Exception as ex:
-            print(f"DB Error: {ex}")
+    # 運用ルールを表示するコンポーネント
+    def create_info_panel(model_cls: Type[BaseModel]):
+        doc = getattr(model_cls, "_doc_rule", "ドキュメント未登録")
+        return ft.Container(
+            content=ft.Column([
+                ft.Text("命名規則について", weight=ft.FontWeight.BOLD),
+                ft.Text(doc, size=12),
+            ]),
+            bgcolor=ft.colors.GREY_900,
+            padding=15,
+            border_radius=10,
+            margin=ft.margin.only(bottom=20)
+        )
 
-    # モーダル表示処理
-    def open_editor(e, model_cls: Type[BaseModel]):
-        # model_cls を渡して保存時に利用可能にする
-        label = getattr(model_cls, "_label", "データ")
-        dlg = create_edit_modal(label, on_save=lambda n, m: save_to_db(n, m, model_cls))
-        page.dialog = dlg
-
-        # 型キャストして明示的に制御
-        alert_dlg = cast(ft.AlertDialog, dlg)
-        alert_dlg.open = True
+    # 画面遷移ロジック
+    def navigate_to(model_cls: Type[BaseModel]):
+        main_content.content = ft.Column([
+            ft.Text(getattr(model_cls, "_label", "画面"), size=30, weight=ft.FontWeight.BOLD),
+            create_info_panel(model_cls),
+            # ここにモデルごとの一覧/操作画面が動的に入る
+        ])
         page.update()
 
-    # レジストリから動的にカードを生成
-    grid_items = []
-    for model_cls in get_registered_models():
-        label = getattr(model_cls, "_label", model_cls.__name__)
-        icon = getattr(model_cls, "_icon", "table_chart")
+    # サイドバー作成
+    sidebar = create_sidebar(page, on_nav=navigate_to)
 
-        grid_items.append(
-            create_model_card(
-                title=label,
-                icon=icon,
-                # ループ変数キャプチャ問題を回避し、クラス自体を渡す
-                on_click=lambda e, m=model_cls: open_editor(e, m)
-            )
-        )
+    # 初期表示（ダッシュボード）
+    navigate_to(get_registered_models()[0])
 
-    # ダッシュボード描画
+    # メインレイアウト
     page.add(
-        ft.Text("ダッシュボード", size=30, weight=ft.FontWeight.BOLD),
-        ft.GridView(
-            controls=grid_items,
-            runs_count=2,
-            max_extent=300,
-            spacing=10,
+        ft.Row(
+            [
+                sidebar,
+                main_content
+            ],
+            expand=True,
+            spacing=0
         )
     )
-    page.update()
 
 if __name__ == "__main__":
     ft.app(target=main, view=ft.AppView.WEB_BROWSER)
