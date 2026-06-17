@@ -1,13 +1,13 @@
 import flet as ft
 from typing import cast, Type
 from models.base import get_registered_models, BaseModel
-from components import create_model_card, create_edit_modal, create_sidebar
+from components import create_sidebar, create_data_table  # 追加
 from services import DatabaseService
 
 def main(page: ft.Page):
-    page.assets_dir = "assets"  # type: ignore
+    page.assets_dir = "assets" # type: ignore
     page.title = "Merchandise Manager"
-    page.theme_mode = ft.ThemeMode.DARK  # 画像に合わせダークモードへ
+    page.theme_mode = ft.ThemeMode.DARK
     page.padding = 0
 
     # 画面制御用コンテナ
@@ -18,7 +18,7 @@ def main(page: ft.Page):
         doc = getattr(model_cls, "_doc_rule", "ドキュメント未登録")
         return ft.Container(
             content=ft.Column([
-                ft.Text("命名規則について", weight=ft.FontWeight.BOLD),
+                ft.Text("運用ルール", weight=ft.FontWeight.BOLD),
                 ft.Text(doc, size=12),
             ]),
             bgcolor=ft.colors.GREY_900,
@@ -29,11 +29,18 @@ def main(page: ft.Page):
 
     # 画面遷移ロジック
     def navigate_to(model_cls: Type[BaseModel]):
+        # コンテンツを更新
         main_content.content = ft.Column([
             ft.Text(getattr(model_cls, "_label", "画面"), size=30, weight=ft.FontWeight.BOLD),
             create_info_panel(model_cls),
-            # ここにモデルごとの一覧/操作画面が動的に入る
-        ])
+            # 自動生成されたデータテーブルを配置
+            ft.Container(
+                content=create_data_table(model_cls),
+                border=ft.border.all(1, ft.colors.GREY_800),
+                border_radius=8,
+                padding=10
+            )
+        ], scroll=ft.ScrollMode.AUTO) # 長い表に対応するためスクロール有効化
         page.update()
 
     # サイドバー作成
@@ -50,7 +57,8 @@ def main(page: ft.Page):
                 main_content
             ],
             expand=True,
-            spacing=0
+            spacing=0,
+            vertical_alignment=ft.CrossAxisAlignment.START
         )
     )
 
