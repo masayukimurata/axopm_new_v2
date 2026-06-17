@@ -1,0 +1,642 @@
+
+====================
+FILE: ./dump_project.py
+====================
+import os
+
+# 出力対象外にするディレクトリ
+EXCLUDE_DIRS = {'.git', '.venv', '__pycache__', '.vscode', 'assets'}
+# 出力するファイル拡張子
+INCLUDE_EXT = {'.py'}
+
+def dump_project():
+    output_file = "all_project_code.txt"
+    with open(output_file, "w", encoding="utf-8") as outfile:
+        for root, dirs, files in os.walk("."):
+            # 除外ディレクトリの処理
+            dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+
+            for file in files:
+                if any(file.endswith(ext) for ext in INCLUDE_EXT):
+                    file_path = os.path.join(root, file)
+                    outfile.write(f"\n{'='*20}\n")
+                    outfile.write(f"FILE: {file_path}\n")
+                    outfile.write(f"{'='*20}\n")
+
+                    try:
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            outfile.write(f.read())
+                    except Exception as e:
+                        outfile.write(f"Error reading file: {e}")
+                    outfile.write("\n")
+    print(f"全コードを {output_file} に書き出しました。")
+
+if __name__ == "__main__":
+    dump_project()
+
+
+====================
+FILE: ./main.py
+====================
+import flet as ft
+from typing import Type, cast
+from models.base import get_registered_models, BaseModel
+from components import create_sidebar, create_data_table, create_recipe_view
+from services import DatabaseService
+
+def main(page: ft.Page):
+    page.title = "Merchandise Manager"
+    page.theme_mode = ft.ThemeMode.DARK
+    page.padding = 0
+
+    main_content = ft.Container(expand=True, padding=20)
+
+    # ページに要素を追加してから開始
+    sidebar = create_sidebar(page, on_nav=lambda model: navigate_to(model))
+    page.add(ft.Row([sidebar, main_content], expand=True, spacing=0, vertical_alignment=ft.CrossAxisAlignment.START))
+
+    def navigate_to(model_cls: Type[BaseModel]):
+        # コンテンツの初期化（cleanではなくcontent=Noneを使用）
+        main_content.content = None
+
+        if model_cls.__name__ == "Recipe":
+            with DatabaseService.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT r_id, r_name FROM t_recipes")
+                    rows = cur.fetchall()
+                    recipes = [{"r_id": r[0], "r_name": r[1]} for r in rows]
+
+            simulator_container = ft.Container(
+                content=ft.Text("左のレシピを選択するとシミュレーターが起動します", color=ft.colors.GREY_600),
+                expand=True,
+                border=ft.border.all(1, ft.colors.GREY_800),
+                border_radius=10,
+                margin=10,
+                padding=10
+            )
+
+            def on_recipe_selected(r_id: int):
+                simulator_container.content = ft.Column([
+                    ft.Text(f"レシピID: {r_id} の詳細シミュレーター", size=20, weight=ft.FontWeight.BOLD),
+                    ft.Divider(),
+                    ft.Text("※材料結合クエリを実装予定", color=ft.colors.AMBER)
+                ])
+                page.update()
+
+            main_content.content = ft.Row([
+                create_recipe_view(page, recipes, on_select_recipe=on_recipe_selected),
+                simulator_container
+            ], expand=True)
+
+        else:
+            main_content.content = ft.Column([
+                ft.Text(getattr(model_cls, "_label", "画面"), size=30, weight=ft.FontWeight.BOLD),
+                ft.Container(
+                    content=create_data_table(model_cls),
+                    border=ft.border.all(1, ft.colors.GREY_800),
+                    border_radius=8,
+                    padding=10
+                )
+            ], scroll=ft.ScrollMode.AUTO)
+
+        page.update()
+
+    # 初期表示
+    models = get_registered_models()
+    if models:
+        navigate_to(models[0])
+
+if __name__ == "__main__":
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER)
+
+
+====================
+FILE: ./test/db_check.py
+====================
+# db_check.py (デバッグ用スクリプト)
+from services import DatabaseService
+from models.base import get_registered_models
+
+def verify_db_schema():
+    print("--- DB 接続確認開始 ---")
+    try:
+        with DatabaseService.connection() as conn:
+            with conn.cursor() as cur:
+                # 1. 接続確認
+                cur.execute("SELECT current_schema();")
+                schema = cur.fetchone()[0]
+                print(f"現在接続中スキーマ: {schema}")
+
+                # 2. モデル定義されたテーブルが存在するか確認
+                for model_cls in get_registered_models():
+                    table_name = getattr(model_cls, "_table_name", "unknown")
+                    cur.execute("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables
+                            WHERE table_schema = %s
+                            AND table_name = %s
+                        );
+                    """, (schema, table_name))
+                    exists = cur.fetchone()[0]
+                    status = "✅ OK" if exists else "❌ NOT FOUND"
+                    print(f"テーブルチェック [{table_name}]: {status}")
+    except Exception as e:
+        print(f"接続エラー: {e}")
+
+if __name__ == "__main__":
+    verify_db_schema()
+
+
+====================
+FILE: ./test/inspect_db.py
+====================
+import sys
+import os
+from pathlib import Path
+
+# プロジェクトルート（axiom-new_v2）をパスに追加
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+# これでインポート可能になる
+from services.db import DatabaseService
+
+def inspect_database():
+    # ... (前回のスクリプトと同じ内容) ...
+    query = """
+    SELECT table_name, column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+    ORDER BY table_name, ordinal_position;
+    """
+
+    with DatabaseService.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            results = cur.fetchall()
+
+    schema = {}
+    for table, column in results:
+        if table not in schema: schema[table] = []
+        schema[table].append(column)
+
+    for table, columns in schema.items():
+        print(f"Table: {table}")
+        print(f"  Columns: {', '.join(columns)}")
+        print("-" * 20)
+
+if __name__ == "__main__":
+    inspect_database()
+
+
+====================
+FILE: ./models/__init__.py
+====================
+from models.tables import Recipe, RecipeIngredient, MerchandisePro
+
+__all__ = ["Recipe", "RecipeIngredient", "MerchandisePro"]
+
+
+====================
+FILE: ./models/tables.py
+====================
+from models.base import BaseModel, register_model
+
+@register_model(label="レシピマスター", icon="restaurant_menu", table_name="t_recipes")
+class Recipe(BaseModel):
+    r_id: int
+    r_name: str
+    target_margin_rate: float
+    selling_price: float
+    remarks: str
+    course: str
+    category: str
+    source_url: str
+    serving_size: float
+    total_cost: float
+    instructions: str
+    is_intermediate: bool
+
+@register_model(label="レシピ材料紐付け", icon="list_alt", table_name="t_recipe_ingredients")
+class RecipeIngredient(BaseModel):
+    ing_id: int
+    m_id: str
+    usage_amount: float
+    r_id: int
+
+@register_model(label="商材マスター", icon="inventory", table_name="t_merchandise_pro")
+class MerchandisePro(BaseModel):
+    m_id: str
+    scan_code: str
+    m_name: str
+    partner_id: int
+    store_name: str
+    purchase_unit: str
+    pack_volume: float
+    base_unit: str
+    density: float
+    cost_per_case: float
+    tax_rate: float
+    is_active: bool
+    updated_at: str
+    remarks: str
+    storage_location: str
+    unit_cost: float
+    is_internal_product: bool
+
+@register_model(label="商品マスタ", icon="inventory_2", table_name="t_product_master")
+class ProductMaster(BaseModel):
+    product_id: int
+    vendor_brand_code: str
+    product_name: str
+    product_name_kana: str
+    category_id: int
+    partner_id: int
+    new_jan_code: str
+    new_price: float
+    new_cost_price: float
+    sales_type: str
+    is_carton: bool
+    tax_rate: float
+    updated_at: str
+    creation_date: str
+
+
+====================
+FILE: ./models/base.py
+====================
+from typing import Type, Dict, Any, List
+
+# モデルを登録するためのグローバルレジストリ
+MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {}
+
+def register_model(
+    label: str,
+    icon: str,
+    table_name: str,
+    order: int = 99,
+    menu_group: str = "基本",
+    doc_rule: str = "",
+    schema: str = "public"
+):
+    """
+    モデルに運用情報（順序・グループ・注意書き・テーブル定義）を付与するデコレータ
+    """
+    def decorator(cls: Type):
+        MODEL_REGISTRY[cls.__name__] = {
+            "model": cls,
+            "label": label,
+            "icon": icon,
+            "table_name": table_name,
+            "order": order,
+            "menu_group": menu_group,
+            "doc_rule": doc_rule,
+            "schema": schema
+        }
+        # クラス属性へのセット
+        setattr(cls, "_label", label)
+        setattr(cls, "_icon", icon)
+        setattr(cls, "_table_name", table_name)
+        setattr(cls, "_order", order)
+        setattr(cls, "_menu_group", menu_group)
+        setattr(cls, "_doc_rule", doc_rule)
+        setattr(cls, "_schema", schema)
+        return cls
+    return decorator
+
+def get_registered_models() -> List[Type]:
+    """登録されたモデルをorder順にソートして返す"""
+    sorted_registry = sorted(MODEL_REGISTRY.values(), key=lambda x: x["order"])
+    return [item["model"] for item in sorted_registry]
+
+class BaseModel:
+    """
+    すべてのデータモデルの基底クラス
+    """
+    def __init__(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
+====================
+FILE: ./components/sidebar.py
+====================
+import flet as ft
+from models.base import get_registered_models
+
+# 引数 on_nav を追加して定義する
+def create_sidebar(page: ft.Page, on_nav):
+    nav_items = []
+    for model_cls in get_registered_models():
+        label = getattr(model_cls, "_label", "不明")
+        icon_name = getattr(model_cls, "_icon", "table_chart")
+
+        nav_items.append(
+            ft.ListTile(
+                leading=ft.Icon(getattr(ft.icons, icon_name.upper(), ft.icons.TABLE_CHART)),
+                title=ft.Text(label),
+                # on_nav を呼び出す
+                on_click=lambda e, cls=model_cls: on_nav(cls)
+            )
+        )
+
+    return ft.Container(
+        content=ft.Column([
+            ft.Text("Merchandise", size=20, weight=ft.FontWeight.BOLD),
+            ft.Text("Manager Demo", size=12, color=ft.colors.GREY_500),
+            ft.Container(content=ft.Text("migration_sandbox", size=10), bgcolor=ft.colors.GREY_800, padding=5, border_radius=5),
+            ft.Divider(),
+            *nav_items
+        ], spacing=10),
+        width=250, bgcolor=ft.colors.GREY_900, padding=20
+    )
+
+
+====================
+FILE: ./components/base_input.py
+====================
+import flet as ft
+
+def BaseTextField(label: str, hint: str = "") -> ft.TextField:
+    """
+    アプリ全体で統一されたデザインのテキスト入力フィールド
+    """
+    return ft.TextField(
+        label=label,
+        hint_text=hint,
+        border=ft.InputBorder.OUTLINE,
+        border_radius=8,
+        # 今後のデザイン変更はここで一括管理可能
+    )
+
+
+====================
+FILE: ./components/cards.py
+====================
+import flet as ft
+from typing import Callable, Optional
+
+def create_model_card(
+    title: str,
+    icon: str,
+    on_click: Optional[Callable[[ft.ControlEvent], None]] = None
+) -> ft.Card:
+    """
+    ダッシュボード用のカード型デザインコンポーネント
+    """
+    return ft.Card(
+        content=ft.Container(
+            content=ft.Column(
+                [
+                    ft.Icon(name=icon, size=30),
+                    ft.Text(title, weight=ft.FontWeight.BOLD),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            padding=20,
+            on_click=on_click,
+        ),
+        elevation=2,
+    )
+
+
+====================
+FILE: ./components/__init__.py
+====================
+# components/__init__.py
+from .cards import create_model_card
+from .modals import create_edit_modal
+from .sidebar import create_sidebar
+from .table import create_data_table
+from .recipe_layout import create_recipe_view  # 追加
+
+__all__ = [
+    "create_model_card",
+    "create_edit_modal",
+    "create_sidebar",
+    "create_data_table",
+    "create_recipe_view" # 追加
+]
+
+
+====================
+FILE: ./components/modals.py
+====================
+import flet as ft
+from typing import Callable
+from .base_input import BaseTextField
+
+def create_edit_modal(title: str, on_save: Callable) -> ft.AlertDialog:
+    """
+    新規・編集操作用モーダルコンポーネント
+    保存ボタン押下時に、入力された各フィールドの値を on_save へ渡す
+    """
+    # 共通デザインの入力欄を使用
+    name_field = BaseTextField(label="名称")
+    memo_field = BaseTextField(label="備考")
+
+    return ft.AlertDialog(
+        title=ft.Text(f"{title} 編集"),
+        content=ft.Column(
+            [
+                name_field,
+                memo_field,
+            ],
+            tight=True,
+        ),
+        actions=[
+            ft.TextButton(
+                "キャンセル",
+                on_click=lambda e: e.control.page.close(e.control.page.dialog)
+            ),
+            ft.ElevatedButton(
+                "保存",
+                # lambda で値を明示的に渡すことで、コールバック先で値を利用可能にする
+                on_click=lambda e: on_save(name_field.value, memo_field.value)
+            ),
+        ],
+        actions_alignment=ft.MainAxisAlignment.END,
+    )
+
+
+====================
+FILE: ./components/table.py
+====================
+import flet as ft
+from services.db import DatabaseService
+
+def create_data_table(model_cls):
+    """モデルメタデータに基づきDBからデータを取得し、DataTableを生成する"""
+    table_name = getattr(model_cls, "_table_name", None)
+    if not table_name:
+        return ft.Text("テーブル名が定義されていません")
+
+    try:
+        with DatabaseService.connection() as conn:
+            with conn.cursor() as cur:
+                # 4つのマスターテーブルに絞ったため、このクエリで確実に取得可能
+                cur.execute(f"SELECT * FROM {table_name} LIMIT 50")
+                rows = cur.fetchall()
+                cols = [desc[0] for desc in cur.description]
+    except Exception as e:
+        return ft.Text(f"データ取得エラー: {str(e)}")
+
+    return ft.DataTable(
+        columns=[ft.DataColumn(ft.Text(c)) for c in cols],
+        rows=[
+            ft.DataRow(
+                cells=[ft.DataCell(ft.Text(str(val))) for val in row]
+            ) for row in rows
+        ],
+        border=ft.border.all(1, ft.colors.GREY_700),
+        vertical_lines=ft.border.BorderSide(1, ft.colors.GREY_700),
+        horizontal_lines=ft.border.BorderSide(1, ft.colors.GREY_700),
+    )
+
+
+====================
+FILE: ./components/recipe_layout.py
+====================
+# components/recipe_layout.py
+import flet as ft
+
+def create_recipe_view(page: ft.Page, recipes: list, on_select_recipe):
+    """レシピ画面：左側パネルのみを構築"""
+
+    def create_recipe_card(recipe):
+        return ft.Card(
+            content=ft.Container(
+                content=ft.Text(recipe['r_name'], weight=ft.FontWeight.BOLD),
+                padding=10,
+                on_click=lambda _: on_select_recipe(recipe['r_id'])
+            )
+        )
+
+    return ft.Container(
+        content=ft.Column([
+            ft.TextField(hint_text="レシピ名で検索...", prefix_icon=ft.icons.SEARCH),
+            ft.ListView(
+                controls=[create_recipe_card(r) for r in recipes],
+                expand=True,
+                spacing=10
+            )
+        ]),
+        width=350,
+        padding=10
+    )
+
+
+====================
+FILE: ./services/recipe_engine.py
+====================
+import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from decimal import Decimal
+from typing import List, Dict, Any, Tuple, cast
+
+class MurataRecipeEngine:
+    def __init__(self, db_url: str):
+        self.db_url = db_url
+
+    def _get_connection(self):
+        return psycopg2.connect(self.db_url, cursor_factory=RealDictCursor)
+
+    def calculate_cost_recursive(self, r_id: int) -> Tuple[Decimal, List[Dict[str, Any]]]:
+        """
+        中間仕込み品を考慮した原価の再帰計算ロジック
+        """
+        conn = self._get_connection()
+        try:
+            with conn.cursor() as cur:
+                query = """
+                    SELECT i.m_id, i.usage_amount, m.unit_cost, m.is_internal_product, m.m_name,
+                           r.total_weight_gram
+                    FROM public.t_recipe_ingredients i
+                    JOIN public.t_merchandise_pro m ON i.m_id = m.m_id
+                    LEFT JOIN public.t_recipes r ON (m.is_internal_product = true AND r.r_id = CAST(REPLACE(m.m_id, 'M_', '') AS INTEGER))
+                    WHERE i.r_id = %s AND m.is_active = true
+                    ORDER BY i.m_id
+                """
+                cur.execute(query, (r_id,))
+                ingredients = cast(List[Dict[str, Any]], cur.fetchall())
+
+                if not ingredients:
+                    return Decimal('0.00'), []
+
+                total_cost = Decimal('0.00')
+                details: List[Dict[str, Any]] = []
+
+                for item in ingredients:
+                    m_id = str(item.get('m_id', ''))
+                    qty = Decimal(str(item.get('usage_amount') or '0'))
+                    is_internal = bool(item.get('is_internal_product'))
+
+                    if is_internal:
+                        sub_r_id = int(m_id.replace('M_', ''))
+                        sub_total_cost, _ = self.calculate_cost_recursive(sub_r_id)
+                        total_weight = Decimal(str(item.get('total_weight_gram') or '1'))
+                        unit_price = sub_total_cost / total_weight if total_weight > 0 else Decimal('0.00')
+                    else:
+                        unit_price = Decimal(str(item.get('unit_cost') or '0.00'))
+
+                    line_cost = qty * unit_price
+                    total_cost += line_cost
+
+                    details.append({
+                        "m_name": str(item.get('m_name')),
+                        "quantity": float(qty),
+                        "unit_price": float(unit_price),
+                        "line_cost": float(line_cost)
+                    })
+
+                return total_cost, details
+        finally:
+            conn.close()
+
+
+====================
+FILE: ./services/db.py
+====================
+import os
+import psycopg2
+from psycopg2.pool import SimpleConnectionPool
+from dotenv import load_dotenv
+from contextlib import contextmanager
+
+load_dotenv()
+
+class DatabaseService:
+    _pool = None
+
+    @classmethod
+    def get_pool(cls):
+        if cls._pool is None:
+            cls._pool = SimpleConnectionPool(
+                1, 10,
+                dsn=os.getenv("DATABASE_URL")
+            )
+        return cls._pool
+
+    @classmethod
+    @contextmanager
+    def connection(cls):
+        """with句で接続を安全に取得・解放する"""
+        pool = cls.get_pool()
+        conn = pool.getconn()
+        try:
+            yield conn
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            pool.putconn(conn)
+
+
+====================
+FILE: ./services/__init__.py
+====================
+from .db import DatabaseService
+
+__all__ = ["DatabaseService"]
+
