@@ -39,10 +39,16 @@ if __name__ == "__main__":
 FILE: ./main.py
 ====================
 import flet as ft
+import os
 from typing import Type, cast
 from models.base import get_registered_models, BaseModel
 from components import create_sidebar, create_data_table, create_recipe_view
-from services import DatabaseService
+from services.recipe_engine import MurataRecipeEngine
+from services.db import DatabaseService
+
+# 型安全のためのキャスト: 環境変数がNoneなら空文字を渡す
+db_url = os.getenv("DATABASE_URL") or ""
+engine = MurataRecipeEngine(db_url)
 
 def main(page: ft.Page):
     page.title = "Merchandise Manager"
@@ -51,54 +57,54 @@ def main(page: ft.Page):
 
     main_content = ft.Container(expand=True, padding=20)
 
-    # ページに要素を追加してから開始
+    # sidebar構築時に navigate_to を渡す
     sidebar = create_sidebar(page, on_nav=lambda model: navigate_to(model))
     page.add(ft.Row([sidebar, main_content], expand=True, spacing=0, vertical_alignment=ft.CrossAxisAlignment.START))
 
     def navigate_to(model_cls: Type[BaseModel]):
-        # コンテンツの初期化（cleanではなくcontent=Noneを使用）
         main_content.content = None
 
         if model_cls.__name__ == "Recipe":
             with DatabaseService.connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT r_id, r_name FROM t_recipes")
-                    rows = cur.fetchall()
-                    recipes = [{"r_id": r[0], "r_name": r[1]} for r in rows]
+                    recipes = [{"r_id": r[0], "r_name": r[1]} for r in cur.fetchall()]
 
-            simulator_container = ft.Container(
-                content=ft.Text("左のレシピを選択するとシミュレーターが起動します", color=ft.colors.GREY_600),
-                expand=True,
-                border=ft.border.all(1, ft.colors.GREY_800),
-                border_radius=10,
-                margin=10,
-                padding=10
-            )
+            simulator_area = ft.Container(expand=True, padding=10)
 
             def on_recipe_selected(r_id: int):
-                simulator_container.content = ft.Column([
-                    ft.Text(f"レシピID: {r_id} の詳細シミュレーター", size=20, weight=ft.FontWeight.BOLD),
+                total_cost, ingredients = engine.calculate_cost_recursive(r_id)
+
+                cards = []
+                for item in ingredients:
+                    cards.append(ft.Card(
+                        content=ft.Container(
+                            content=ft.Row([
+                                ft.Text(item['m_name'], width=150, weight=ft.FontWeight.BOLD),
+                                ft.Text(f"{item['quantity']:.1f}", width=50),
+                                ft.Text(f"単価: {item['unit_price']:,.0f}", width=100),
+                                ft.Text(f"小計: {item['line_cost']:,.0f}", weight=ft.FontWeight.BOLD)
+                            ]),
+                            padding=10
+                        )
+                    ))
+
+                simulator_area.content = ft.Column([
+                    ft.Text(f"原価合計: {total_cost:,.0f} 円", size=24, color=ft.colors.AMBER),
                     ft.Divider(),
-                    ft.Text("※材料結合クエリを実装予定", color=ft.colors.AMBER)
+                    ft.ListView(controls=cards, expand=True)
                 ])
                 page.update()
 
             main_content.content = ft.Row([
                 create_recipe_view(page, recipes, on_select_recipe=on_recipe_selected),
-                simulator_container
+                simulator_area
             ], expand=True)
-
         else:
             main_content.content = ft.Column([
                 ft.Text(getattr(model_cls, "_label", "画面"), size=30, weight=ft.FontWeight.BOLD),
-                ft.Container(
-                    content=create_data_table(model_cls),
-                    border=ft.border.all(1, ft.colors.GREY_800),
-                    border_radius=8,
-                    padding=10
-                )
+                ft.Container(content=create_data_table(model_cls), border=ft.border.all(1, ft.colors.GREY_800), padding=10)
             ], scroll=ft.ScrollMode.AUTO)
-
         page.update()
 
     # 初期表示
@@ -145,6 +151,31 @@ def verify_db_schema():
 
 if __name__ == "__main__":
     verify_db_schema()
+
+
+====================
+FILE: ./test/db_check2.py
+====================
+import sys
+import os
+from pathlib import Path
+
+# プロジェクトルート（axiom-new_v2）を検索パスに追加
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+# この後からインポートが可能になる
+from services.db import DatabaseService
+from dotenv import load_dotenv
+
+load_dotenv()
+
+print(f"DEBUG: URL is {os.getenv('DATABASE_URL')}")
+
+try:
+    with DatabaseService.connection() as conn:
+        print("接続成功！")
+except Exception as e:
+    print(f"接続失敗: {e}")
 
 
 ====================
@@ -372,17 +403,16 @@ def BaseTextField(label: str, hint: str = "") -> ft.TextField:
 ====================
 FILE: ./components/cards.py
 ====================
+# components/cards.py
 import flet as ft
 from typing import Callable, Optional
 
+# --- 1. ナビゲーション用カード (ダッシュボード) ---
 def create_model_card(
     title: str,
     icon: str,
     on_click: Optional[Callable[[ft.ControlEvent], None]] = None
 ) -> ft.Card:
-    """
-    ダッシュボード用のカード型デザインコンポーネント
-    """
     return ft.Card(
         content=ft.Container(
             content=ft.Column(
@@ -398,23 +428,45 @@ def create_model_card(
         elevation=2,
     )
 
+# --- 2. 編集・表示用カード (シミュレーター) ---
+def create_ingredient_card(item: dict, on_change: Callable):
+    """
+    材料カード：数量を変更すると on_change を通じて即時再計算へ連携
+    """
+    return ft.Card(
+        content=ft.Container(
+            content=ft.Row([
+                ft.Text(item['m_name'], width=150, weight=ft.FontWeight.BOLD),
+                ft.TextField(
+                    value=str(item['quantity']),
+                    width=80,
+                    on_change=lambda e: on_change(item, e.control.value)
+                ),
+                ft.Text(f"単価: {item['unit_price']:,.0f}", width=100),
+                ft.Text(f"小計: {item['line_cost']:,.0f}", weight=ft.FontWeight.BOLD)
+            ]),
+            padding=10
+        )
+    )
+
 
 ====================
 FILE: ./components/__init__.py
 ====================
 # components/__init__.py
-from .cards import create_model_card
+from .cards import create_model_card, create_ingredient_card
 from .modals import create_edit_modal
 from .sidebar import create_sidebar
 from .table import create_data_table
-from .recipe_layout import create_recipe_view  # 追加
+from .recipe_layout import create_recipe_view
 
 __all__ = [
     "create_model_card",
+    "create_ingredient_card",
     "create_edit_modal",
     "create_sidebar",
     "create_data_table",
-    "create_recipe_view" # 追加
+    "create_recipe_view"
 ]
 
 
@@ -599,7 +651,7 @@ FILE: ./services/db.py
 ====================
 import os
 import psycopg2
-from psycopg2.pool import SimpleConnectionPool
+from psycopg2 import pool
 from dotenv import load_dotenv
 from contextlib import contextmanager
 
@@ -609,28 +661,36 @@ class DatabaseService:
     _pool = None
 
     @classmethod
-    def get_pool(cls):
+    def get_pool(cls) -> pool.ThreadedConnectionPool:
+        """接続プールを初期化して返す"""
         if cls._pool is None:
-            cls._pool = SimpleConnectionPool(
-                1, 10,
-                dsn=os.getenv("DATABASE_URL")
+            # DATABASE_URLの確認
+            dsn = os.getenv("DATABASE_URL")
+            if not dsn:
+                raise ValueError("環境変数 DATABASE_URL が設定されていません。")
+
+            # 最大接続数を5に制限し、接続枯渇を防ぐ
+            cls._pool = pool.ThreadedConnectionPool(
+                1, 5,
+                dsn=dsn
             )
         return cls._pool
 
     @classmethod
     @contextmanager
     def connection(cls):
-        """with句で接続を安全に取得・解放する"""
-        pool = cls.get_pool()
-        conn = pool.getconn()
+        """with句で確実に接続を取得し、処理後にプールへ返却する"""
+        db_pool = cls.get_pool()
+        conn = db_pool.getconn()
         try:
             yield conn
             conn.commit()
-        except Exception as e:
+        except Exception:
             conn.rollback()
-            raise e
+            raise
         finally:
-            pool.putconn(conn)
+            # 正常時も例外時も必ず接続をプールに戻す
+            db_pool.putconn(conn)
 
 
 ====================
