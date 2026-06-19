@@ -40,13 +40,18 @@ FILE: ./main.py
 ====================
 import flet as ft
 import os
-from typing import Type, cast
+from typing import Type
 from models.base import get_registered_models, BaseModel
-from components import create_sidebar, create_data_table, create_recipe_view
+from components import (
+    create_sidebar,
+    create_data_table,
+    create_recipe_view,
+    create_ingredient_card
+)
 from services.recipe_engine import MurataRecipeEngine
 from services.db import DatabaseService
 
-# 型安全のためのキャスト: 環境変数がNoneなら空文字を渡す
+# エンジン初期化
 db_url = os.getenv("DATABASE_URL") or ""
 engine = MurataRecipeEngine(db_url)
 
@@ -57,57 +62,65 @@ def main(page: ft.Page):
 
     main_content = ft.Container(expand=True, padding=20)
 
-    # sidebar構築時に navigate_to を渡す
-    sidebar = create_sidebar(page, on_nav=lambda model: navigate_to(model))
-    page.add(ft.Row([sidebar, main_content], expand=True, spacing=0, vertical_alignment=ft.CrossAxisAlignment.START))
-
     def navigate_to(model_cls: Type[BaseModel]):
         main_content.content = None
 
         if model_cls.__name__ == "Recipe":
-            with DatabaseService.connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT r_id, r_name FROM t_recipes")
-                    recipes = [{"r_id": r[0], "r_name": r[1]} for r in cur.fetchall()]
+            # レシピ一覧の取得
+            try:
+                with DatabaseService.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT r_id, r_name FROM t_recipes")
+                        recipes = [{"r_id": r[0], "r_name": r[1]} for r in cur.fetchall()]
+            except Exception as e:
+                main_content.content = ft.Text(f"DB接続エラー: {e}", color="red")
+                page.update()
+                return
 
             simulator_area = ft.Container(expand=True, padding=10)
 
+            def handle_ingredient_change(item, new_qty_str):
+                try:
+                    new_qty = float(new_qty_str)
+                    print(f"Update {item['m_name']} to {new_qty}")
+                except ValueError:
+                    pass
+
             def on_recipe_selected(r_id: int):
-                total_cost, ingredients = engine.calculate_cost_recursive(r_id)
+                # 再計算ロジック
+                try:
+                    total_cost, ingredients = engine.calculate_cost_recursive(r_id)
+                    cards = [create_ingredient_card(item, handle_ingredient_change) for item in ingredients]
 
-                cards = []
-                for item in ingredients:
-                    cards.append(ft.Card(
-                        content=ft.Container(
-                            content=ft.Row([
-                                ft.Text(item['m_name'], width=150, weight=ft.FontWeight.BOLD),
-                                ft.Text(f"{item['quantity']:.1f}", width=50),
-                                ft.Text(f"単価: {item['unit_price']:,.0f}", width=100),
-                                ft.Text(f"小計: {item['line_cost']:,.0f}", weight=ft.FontWeight.BOLD)
-                            ]),
-                            padding=10
-                        )
-                    ))
-
-                simulator_area.content = ft.Column([
-                    ft.Text(f"原価合計: {total_cost:,.0f} 円", size=24, color=ft.colors.AMBER),
-                    ft.Divider(),
-                    ft.ListView(controls=cards, expand=True)
-                ])
-                page.update()
+                    simulator_area.content = ft.Column([
+                        ft.Text(f"原価合計: {total_cost:,.0f} 円", size=24, color=ft.colors.AMBER),
+                        ft.Divider(),
+                        ft.ListView(controls=cards, expand=True, spacing=5) # 修正: ListViewを確実に展開
+                    ], expand=True)
+                    simulator_area.update()
+                except Exception as e:
+                    simulator_area.content = ft.Text(f"計算エラー: {str(e)}", color="red")
+                    simulator_area.update()
 
             main_content.content = ft.Row([
                 create_recipe_view(page, recipes, on_select_recipe=on_recipe_selected),
                 simulator_area
             ], expand=True)
+
         else:
+            # 基本テーブル表示
             main_content.content = ft.Column([
                 ft.Text(getattr(model_cls, "_label", "画面"), size=30, weight=ft.FontWeight.BOLD),
-                ft.Container(content=create_data_table(model_cls), border=ft.border.all(1, ft.colors.GREY_800), padding=10)
+                ft.Container(content=create_data_table(model_cls), padding=10)
             ], scroll=ft.ScrollMode.AUTO)
+
         page.update()
 
-    # 初期表示
+    # サイドバー構築
+    sidebar = create_sidebar(page, on_nav=navigate_to)
+    page.add(ft.Row([sidebar, main_content], expand=True, spacing=0, vertical_alignment=ft.CrossAxisAlignment.START))
+
+    # 初期起動時の表示
     models = get_registered_models()
     if models:
         navigate_to(models[0])
@@ -578,9 +591,43 @@ def create_recipe_view(page: ft.Page, recipes: list, on_select_recipe):
 
 
 ====================
+FILE: ./.doc/db-search.py
+====================
+import csv
+import os
+
+def analyze_db_schema(csv_file_name):
+    # スクリプトがある場所（.docフォルダ）を基準にする
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_file_path = os.path.join(base_dir, csv_file_name)
+
+    if not os.path.exists(csv_file_path):
+        print(f"エラー: ファイルが見つかりません -> {csv_file_path}")
+        return
+
+    print(f"解析開始: {csv_file_path}")
+
+    # 以下、精査ロジック...
+    numeric_keywords = ['cost', 'price', 'amount', 'qty', 'size', 'rate', 'total', 'volume', 'density', 'hourly', 'salary', '単価', '数量', '小計']
+
+    print("<table>")
+    with open(csv_file_path, mode='r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            col = row['column_name'].lower()
+            dtype = row['data_type'].lower()
+
+            if any(key in col for key in numeric_keywords):
+                if 'numeric' not in dtype and 'integer' not in dtype:
+                    print(f"<tr><td>{row['table_name']}</td><td>{row['column_name']}</td><td>{row['data_type']}</td><td>数値型へ移行推奨</td></tr>")
+    print("</table>")
+
+analyze_db_schema('schema.csv')
+
+
+====================
 FILE: ./services/recipe_engine.py
 ====================
-import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from decimal import Decimal
@@ -594,18 +641,15 @@ class MurataRecipeEngine:
         return psycopg2.connect(self.db_url, cursor_factory=RealDictCursor)
 
     def calculate_cost_recursive(self, r_id: int) -> Tuple[Decimal, List[Dict[str, Any]]]:
-        """
-        中間仕込み品を考慮した原価の再帰計算ロジック
-        """
         conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 query = """
                     SELECT i.m_id, i.usage_amount, m.unit_cost, m.is_internal_product, m.m_name,
-                           r.total_weight_gram
+                           CAST(NULLIF(r.serving_size, '') AS NUMERIC) as serving_size
                     FROM public.t_recipe_ingredients i
                     JOIN public.t_merchandise_pro m ON i.m_id = m.m_id
-                    LEFT JOIN public.t_recipes r ON (m.is_internal_product = true AND r.r_id = CAST(REPLACE(m.m_id, 'M_', '') AS INTEGER))
+                    LEFT JOIN public.t_recipes r ON (m.is_internal_product = true AND r.r_id = CAST(NULLIF(REGEXP_REPLACE(m.m_id, '[^0-9]', '', 'g'), '') AS INTEGER))
                     WHERE i.r_id = %s AND m.is_active = true
                     ORDER BY i.m_id
                 """
@@ -619,18 +663,26 @@ class MurataRecipeEngine:
                 details: List[Dict[str, Any]] = []
 
                 for item in ingredients:
-                    m_id = str(item.get('m_id', ''))
                     qty = Decimal(str(item.get('usage_amount') or '0'))
                     is_internal = bool(item.get('is_internal_product'))
 
                     if is_internal:
-                        sub_r_id = int(m_id.replace('M_', ''))
+                        # 1. IDを安全に整数変換
+                        m_id_str = str(item.get('m_id', ''))
+                        numeric_id_str = ''.join(filter(str.isdigit, m_id_str))
+                        sub_r_id = int(numeric_id_str)
+
+                        # 2. 中間レシピの原価計算（ここでは1単位あたりの単価が出る）
                         sub_total_cost, _ = self.calculate_cost_recursive(sub_r_id)
-                        total_weight = Decimal(str(item.get('total_weight_gram') or '1'))
+
+                        # 3. 単位あたりの単価を算出 (総コスト / 合計重量)
+                        weight_val = item.get('serving_size')
+                        total_weight = Decimal(str(weight_val)) if weight_val is not None and weight_val != '' else Decimal('1.0')
                         unit_price = sub_total_cost / total_weight if total_weight > 0 else Decimal('0.00')
                     else:
                         unit_price = Decimal(str(item.get('unit_cost') or '0.00'))
 
+                    # 4. 使用量(usage_amount)を掛けて小計を算出
                     line_cost = qty * unit_price
                     total_cost += line_cost
 
