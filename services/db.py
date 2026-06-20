@@ -3,6 +3,7 @@ import psycopg2
 from psycopg2 import pool
 from dotenv import load_dotenv
 from contextlib import contextmanager
+import atexit
 
 load_dotenv()
 
@@ -40,3 +41,13 @@ class DatabaseService:
         finally:
             # 正常時も例外時も必ず接続をプールに戻す
             db_pool.putconn(conn)
+
+    @classmethod
+    def close_all(cls):
+        """アプリケーション終了時に接続プールを閉じる"""
+        if cls._pool:
+            cls._pool.closeall()
+            print("Database connection pool closed.")
+
+# アプリケーション終了時に確実にプールを閉じる
+atexit.register(DatabaseService.close_all)
