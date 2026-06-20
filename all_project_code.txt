@@ -40,6 +40,9 @@ FILE: ./main.py
 ====================
 import flet as ft
 import os
+import time
+import threading
+import warnings
 from typing import Type
 from models.base import get_registered_models, BaseModel
 from components import (
@@ -50,6 +53,9 @@ from components import (
 )
 from services.recipe_engine import MurataRecipeEngine
 from services.db import DatabaseService
+
+# 非推奨警告を抑制してコンソールをクリーンに保つ
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # エンジン初期化
 db_url = os.getenv("DATABASE_URL") or ""
@@ -62,71 +68,65 @@ def main(page: ft.Page):
 
     main_content = ft.Container(expand=True, padding=20)
 
+    # --- UI更新をバックグラウンドで行う安定した構成 ---
     def navigate_to(model_cls: Type[BaseModel]):
-        main_content.content = None
-
-        if model_cls.__name__ == "Recipe":
-            # レシピ一覧の取得
-            try:
-                with DatabaseService.connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT r_id, r_name FROM t_recipes")
-                        recipes = [{"r_id": r[0], "r_name": r[1]} for r in cur.fetchall()]
-            except Exception as e:
-                main_content.content = ft.Text(f"DB接続エラー: {e}", color="red")
-                page.update()
-                return
-
-            simulator_area = ft.Container(expand=True, padding=10)
-
-            def handle_ingredient_change(item, new_qty_str):
-                try:
-                    new_qty = float(new_qty_str)
-                    print(f"Update {item['m_name']} to {new_qty}")
-                except ValueError:
-                    pass
-
-            def on_recipe_selected(r_id: int):
-                # 再計算ロジック
-                try:
-                    total_cost, ingredients = engine.calculate_cost_recursive(r_id)
-                    cards = [create_ingredient_card(item, handle_ingredient_change) for item in ingredients]
-
-                    simulator_area.content = ft.Column([
-                        ft.Text(f"原価合計: {total_cost:,.0f} 円", size=24, color=ft.colors.AMBER),
-                        ft.Divider(),
-                        ft.ListView(controls=cards, expand=True, spacing=5) # 修正: ListViewを確実に展開
-                    ], expand=True)
-                    simulator_area.update()
-                except Exception as e:
-                    simulator_area.content = ft.Text(f"計算エラー: {str(e)}", color="red")
-                    simulator_area.update()
-
-            main_content.content = ft.Row([
-                create_recipe_view(page, recipes, on_select_recipe=on_recipe_selected),
-                simulator_area
-            ], expand=True)
-
-        else:
-            # 基本テーブル表示
-            main_content.content = ft.Column([
-                ft.Text(getattr(model_cls, "_label", "画面"), size=30, weight=ft.FontWeight.BOLD),
-                ft.Container(content=create_data_table(model_cls), padding=10)
-            ], scroll=ft.ScrollMode.AUTO)
-
+        main_content.content = ft.ProgressRing()
         page.update()
+
+        def background_load():
+            """バックグラウンドで重い処理を行う"""
+            try:
+                if model_cls.__name__ == "Recipe":
+                    with DatabaseService.connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT r_id, r_name FROM t_recipes")
+                            recipes = [{"r_id": r[0], "r_name": r[1]} for r in cur.fetchall()]
+
+                    simulator_area = ft.Container(expand=True, padding=10)
+
+                    def on_recipe_selected(r_id: int):
+                        total_cost, ingredients = engine.calculate_cost_recursive(r_id)
+                        cards = [create_ingredient_card(item, lambda *args: None) for item in ingredients]
+                        simulator_area.content = ft.Column([
+                            # ft.Colors.AMBER に置換
+                            ft.Text(f"原価合計: {total_cost:,.0f} 円", size=24, color=ft.colors.AMBER),
+                            ft.Divider(),
+                            ft.ListView(controls=cards, expand=True, spacing=5)
+                        ], expand=True)
+                        simulator_area.update()
+
+                    content = ft.Row([
+                        create_recipe_view(page, recipes, on_select_recipe=on_recipe_selected),
+                        simulator_area
+                    ], expand=True)
+                else:
+                    content = ft.Column([
+                        ft.Text(getattr(model_cls, "_label", "画面"), size=30, weight=ft.FontWeight.BOLD),
+                        ft.Container(content=create_data_table(model_cls), padding=10)
+                    ], scroll=ft.ScrollMode.AUTO)
+
+                # メインスレッドへ結果を反映
+                main_content.content = content
+                page.update()
+            except Exception as e:
+                main_content.content = ft.Text(f"エラー: {str(e)}", color=ft.colors.RED)
+                page.update()
+
+        # スレッド起動でUIフリーズを物理的に回避
+        threading.Thread(target=background_load, daemon=True).start()
 
     # サイドバー構築
     sidebar = create_sidebar(page, on_nav=navigate_to)
     page.add(ft.Row([sidebar, main_content], expand=True, spacing=0, vertical_alignment=ft.CrossAxisAlignment.START))
 
-    # 初期起動時の表示
+    # 初期表示
     models = get_registered_models()
     if models:
         navigate_to(models[0])
 
 if __name__ == "__main__":
-    ft.app(target=main, view=ft.AppView.WEB_BROWSER)
+    # キャッシュ対策: URLにタイムスタンプを付与
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=8502)
 
 
 ====================
@@ -418,7 +418,8 @@ FILE: ./components/cards.py
 ====================
 # components/cards.py
 import flet as ft
-from typing import Callable, Optional
+from typing import Callable, Optional, Any
+from decimal import Decimal
 
 # --- 1. ナビゲーション用カード (ダッシュボード) ---
 def create_model_card(
@@ -442,21 +443,30 @@ def create_model_card(
     )
 
 # --- 2. 編集・表示用カード (シミュレーター) ---
-def create_ingredient_card(item: dict, on_change: Callable):
+def create_ingredient_card(item: dict[str, Any], on_change: Callable[[dict, str], None]) -> ft.Card:
     """
-    材料カード：数量を変更すると on_change を通じて即時再計算へ連携
+    型安全性を確保した材料カード。
+    DBの数値型変更に対応し、UIは文字列として値を保持しつつ、
+    コールバックで適切な型変換を行う設計。
     """
+    # 辞書の取得に安全策を講じる
+    m_name = str(item.get('m_name', '不明'))
+    quantity = item.get('quantity', 0)
+    unit_price = item.get('unit_price', 0)
+    line_cost = item.get('line_cost', 0)
+
     return ft.Card(
         content=ft.Container(
             content=ft.Row([
-                ft.Text(item['m_name'], width=150, weight=ft.FontWeight.BOLD),
+                ft.Text(m_name, width=150, weight=ft.FontWeight.BOLD),
                 ft.TextField(
-                    value=str(item['quantity']),
+                    value=str(quantity),
                     width=80,
+                    # 入力値の変化をそのままコールバックへ渡す（バリデーションはロジック側で処理）
                     on_change=lambda e: on_change(item, e.control.value)
                 ),
-                ft.Text(f"単価: {item['unit_price']:,.0f}", width=100),
-                ft.Text(f"小計: {item['line_cost']:,.0f}", weight=ft.FontWeight.BOLD)
+                ft.Text(f"単価: {unit_price:,.0f}", width=100),
+                ft.Text(f"小計: {line_cost:,.0f}", weight=ft.FontWeight.BOLD)
             ]),
             padding=10
         )
@@ -528,33 +538,46 @@ FILE: ./components/table.py
 ====================
 import flet as ft
 from services.db import DatabaseService
+from typing import Any
 
-def create_data_table(model_cls):
-    """モデルメタデータに基づきDBからデータを取得し、DataTableを生成する"""
+def create_data_table(model_cls: Any) -> ft.Control:
+    """
+    モデルメタデータに基づきDBからデータを取得し、DataTableを生成する。
+    日本語カラム名、テーブル名に対応するためダブルクォーテーションで保護する。
+    """
     table_name = getattr(model_cls, "_table_name", None)
     if not table_name:
-        return ft.Text("テーブル名が定義されていません")
+        return ft.Text("テーブル名が定義されていません", color="red")
+
+    # モデルクラスからフィールド名を取得（順序を維持）
+    fields = list(model_cls.__annotations__.keys())
 
     try:
         with DatabaseService.connection() as conn:
             with conn.cursor() as cur:
-                # 4つのマスターテーブルに絞ったため、このクエリで確実に取得可能
-                cur.execute(f"SELECT * FROM {table_name} LIMIT 50")
+                # 識別子をダブルクォーテーションで囲んで安全にクエリ
+                cols_query = ", ".join([f'"{f}"' for f in fields])
+                query = f'SELECT {cols_query} FROM "{table_name}" LIMIT 50'
+                cur.execute(query)
                 rows = cur.fetchall()
-                cols = [desc[0] for desc in cur.description]
     except Exception as e:
-        return ft.Text(f"データ取得エラー: {str(e)}")
+        return ft.Text(f"データ取得エラー: {str(e)}", color="red")
 
+    # データ表示用テーブルの構築
     return ft.DataTable(
-        columns=[ft.DataColumn(ft.Text(c)) for c in cols],
+        columns=[ft.DataColumn(ft.Text(f)) for f in fields],
         rows=[
             ft.DataRow(
-                cells=[ft.DataCell(ft.Text(str(val))) for val in row]
+                cells=[
+                    ft.DataCell(ft.Text(str(val if val is not None else "")))
+                    for val in row
+                ]
             ) for row in rows
         ],
         border=ft.border.all(1, ft.colors.GREY_700),
         vertical_lines=ft.border.BorderSide(1, ft.colors.GREY_700),
         horizontal_lines=ft.border.BorderSide(1, ft.colors.GREY_700),
+        heading_row_color=ft.colors.GREY_800,
     )
 
 
@@ -628,6 +651,7 @@ analyze_db_schema('schema.csv')
 ====================
 FILE: ./services/recipe_engine.py
 ====================
+
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from decimal import Decimal
@@ -644,9 +668,10 @@ class MurataRecipeEngine:
         conn = self._get_connection()
         try:
             with conn.cursor() as cur:
+                # 型移行済みのため、直接カラム参照が可能になり、クエリが高速化されます
                 query = """
                     SELECT i.m_id, i.usage_amount, m.unit_cost, m.is_internal_product, m.m_name,
-                           CAST(NULLIF(r.serving_size, '') AS NUMERIC) as serving_size
+                           r.serving_size
                     FROM public.t_recipe_ingredients i
                     JOIN public.t_merchandise_pro m ON i.m_id = m.m_id
                     LEFT JOIN public.t_recipes r ON (m.is_internal_product = true AND r.r_id = CAST(NULLIF(REGEXP_REPLACE(m.m_id, '[^0-9]', '', 'g'), '') AS INTEGER))
@@ -667,22 +692,18 @@ class MurataRecipeEngine:
                     is_internal = bool(item.get('is_internal_product'))
 
                     if is_internal:
-                        # 1. IDを安全に整数変換
                         m_id_str = str(item.get('m_id', ''))
                         numeric_id_str = ''.join(filter(str.isdigit, m_id_str))
                         sub_r_id = int(numeric_id_str)
-
-                        # 2. 中間レシピの原価計算（ここでは1単位あたりの単価が出る）
                         sub_total_cost, _ = self.calculate_cost_recursive(sub_r_id)
 
-                        # 3. 単位あたりの単価を算出 (総コスト / 合計重量)
+                        # 数値型確定のため、単純にDecimalとして処理可能
                         weight_val = item.get('serving_size')
-                        total_weight = Decimal(str(weight_val)) if weight_val is not None and weight_val != '' else Decimal('1.0')
+                        total_weight = weight_val if weight_val is not None else Decimal('1.0')
                         unit_price = sub_total_cost / total_weight if total_weight > 0 else Decimal('0.00')
                     else:
                         unit_price = Decimal(str(item.get('unit_cost') or '0.00'))
 
-                    # 4. 使用量(usage_amount)を掛けて小計を算出
                     line_cost = qty * unit_price
                     total_cost += line_cost
 
@@ -706,6 +727,7 @@ import psycopg2
 from psycopg2 import pool
 from dotenv import load_dotenv
 from contextlib import contextmanager
+import atexit
 
 load_dotenv()
 
@@ -743,6 +765,16 @@ class DatabaseService:
         finally:
             # 正常時も例外時も必ず接続をプールに戻す
             db_pool.putconn(conn)
+
+    @classmethod
+    def close_all(cls):
+        """アプリケーション終了時に接続プールを閉じる"""
+        if cls._pool:
+            cls._pool.closeall()
+            print("Database connection pool closed.")
+
+# アプリケーション終了時に確実にプールを閉じる
+atexit.register(DatabaseService.close_all)
 
 
 ====================

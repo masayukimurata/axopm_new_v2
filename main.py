@@ -1,6 +1,5 @@
 import flet as ft
 import os
-import time
 import threading
 import warnings
 from typing import Type
@@ -14,12 +13,11 @@ from components import (
 from services.recipe_engine import MurataRecipeEngine
 from services.db import DatabaseService
 
-# 非推奨警告を抑制してコンソールをクリーンに保つ
+# 非推奨警告を抑制
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# エンジン初期化
-db_url = os.getenv("DATABASE_URL") or ""
-engine = MurataRecipeEngine(db_url)
+# エンジン初期化 (接続注入対応のため引数不要)
+engine = MurataRecipeEngine()
 
 def main(page: ft.Page):
     page.title = "Merchandise Manager"
@@ -36,34 +34,35 @@ def main(page: ft.Page):
         def background_load():
             """バックグラウンドで重い処理を行う"""
             try:
-                if model_cls.__name__ == "Recipe":
-                    with DatabaseService.connection() as conn:
+                # 共通の接続を使用
+                with DatabaseService.connection() as conn:
+                    if model_cls.__name__ == "Recipe":
                         with conn.cursor() as cur:
                             cur.execute("SELECT r_id, r_name FROM t_recipes")
                             recipes = [{"r_id": r[0], "r_name": r[1]} for r in cur.fetchall()]
 
-                    simulator_area = ft.Container(expand=True, padding=10)
+                        simulator_area = ft.Container(expand=True, padding=10)
 
-                    def on_recipe_selected(r_id: int):
-                        total_cost, ingredients = engine.calculate_cost_recursive(r_id)
-                        cards = [create_ingredient_card(item, lambda *args: None) for item in ingredients]
-                        simulator_area.content = ft.Column([
-                            # ft.Colors.AMBER に置換
-                            ft.Text(f"原価合計: {total_cost:,.0f} 円", size=24, color=ft.colors.AMBER),
-                            ft.Divider(),
-                            ft.ListView(controls=cards, expand=True, spacing=5)
+                        def on_recipe_selected(r_id: int):
+                            # 既存の接続(conn)をengineに渡す（これが重要！）
+                            total_cost, ingredients = engine.calculate_cost_recursive(conn, r_id)
+                            cards = [create_ingredient_card(item, lambda *args: None) for item in ingredients]
+                            simulator_area.content = ft.Column([
+                                ft.Text(f"原価合計: {total_cost:,.0f} 円", size=24, color=ft.colors.AMBER),
+                                ft.Divider(),
+                                ft.ListView(controls=cards, expand=True, spacing=5)
+                            ], expand=True)
+                            simulator_area.update()
+
+                        content = ft.Row([
+                            create_recipe_view(page, recipes, on_select_recipe=on_recipe_selected),
+                            simulator_area
                         ], expand=True)
-                        simulator_area.update()
-
-                    content = ft.Row([
-                        create_recipe_view(page, recipes, on_select_recipe=on_recipe_selected),
-                        simulator_area
-                    ], expand=True)
-                else:
-                    content = ft.Column([
-                        ft.Text(getattr(model_cls, "_label", "画面"), size=30, weight=ft.FontWeight.BOLD),
-                        ft.Container(content=create_data_table(model_cls), padding=10)
-                    ], scroll=ft.ScrollMode.AUTO)
+                    else:
+                        content = ft.Column([
+                            ft.Text(getattr(model_cls, "_label", "画面"), size=30, weight=ft.FontWeight.BOLD),
+                            ft.Container(content=create_data_table(model_cls), padding=10)
+                        ], scroll=ft.ScrollMode.AUTO)
 
                 # メインスレッドへ結果を反映
                 main_content.content = content
@@ -72,7 +71,7 @@ def main(page: ft.Page):
                 main_content.content = ft.Text(f"エラー: {str(e)}", color=ft.colors.RED)
                 page.update()
 
-        # スレッド起動でUIフリーズを物理的に回避
+        # スレッド起動
         threading.Thread(target=background_load, daemon=True).start()
 
     # サイドバー構築
@@ -85,5 +84,4 @@ def main(page: ft.Page):
         navigate_to(models[0])
 
 if __name__ == "__main__":
-    # キャッシュ対策: URLにタイムスタンプを付与
     ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=8502)
