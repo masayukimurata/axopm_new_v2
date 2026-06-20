@@ -2,7 +2,7 @@ import flet as ft
 import os
 import threading
 import warnings
-from typing import Type
+from typing import Type, Optional
 from models.base import get_registered_models, BaseModel
 from components import (
     create_sidebar,
@@ -13,10 +13,8 @@ from components import (
 from services.recipe_engine import MurataRecipeEngine
 from services.db import DatabaseService
 
-# 非推奨警告を抑制
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# エンジン初期化 (接続注入対応のため引数不要)
 engine = MurataRecipeEngine()
 
 def main(page: ft.Page):
@@ -26,16 +24,30 @@ def main(page: ft.Page):
 
     main_content = ft.Container(expand=True, padding=20)
 
-    # --- UI更新をバックグラウンドで行う安定した構成 ---
+    # スレッドキャンセル用のイベント管理変数
+    current_cancel_event: Optional[threading.Event] = None
+
     def navigate_to(model_cls: Type[BaseModel]):
+        nonlocal current_cancel_event
+
+        # 1. 前回のスレッドをキャンセル
+        if current_cancel_event:
+            current_cancel_event.set()
+
+        # 2. 新しいイベントを発行
+        new_event = threading.Event()
+        current_cancel_event = new_event
+
         main_content.content = ft.ProgressRing()
         page.update()
 
         def background_load():
-            """バックグラウンドで重い処理を行う"""
             try:
-                # 共通の接続を使用
+                # DB接続を取得
                 with DatabaseService.connection() as conn:
+                    # キャンセルチェック
+                    if new_event.is_set(): return
+
                     if model_cls.__name__ == "Recipe":
                         with conn.cursor() as cur:
                             cur.execute("SELECT r_id, r_name FROM t_recipes")
@@ -44,8 +56,10 @@ def main(page: ft.Page):
                         simulator_area = ft.Container(expand=True, padding=10)
 
                         def on_recipe_selected(r_id: int):
-                            # 既存の接続(conn)をengineに渡す（これが重要！）
                             total_cost, ingredients = engine.calculate_cost_recursive(conn, r_id)
+                            # キャンセルチェック
+                            if new_event.is_set(): return
+
                             cards = [create_ingredient_card(item, lambda *args: None) for item in ingredients]
                             simulator_area.content = ft.Column([
                                 ft.Text(f"原価合計: {total_cost:,.0f} 円", size=24, color=ft.colors.AMBER),
@@ -64,21 +78,21 @@ def main(page: ft.Page):
                             ft.Container(content=create_data_table(model_cls), padding=10)
                         ], scroll=ft.ScrollMode.AUTO)
 
-                # メインスレッドへ結果を反映
-                main_content.content = content
-                page.update()
-            except Exception as e:
-                main_content.content = ft.Text(f"エラー: {str(e)}", color=ft.colors.RED)
-                page.update()
+                # 最終確認: イベントがセットされていない場合のみUI更新
+                if not new_event.is_set():
+                    main_content.content = content
+                    page.update()
 
-        # スレッド起動
+            except Exception as e:
+                if not new_event.is_set():
+                    main_content.content = ft.Text(f"エラー: {str(e)}", color=ft.colors.RED)
+                    page.update()
+
         threading.Thread(target=background_load, daemon=True).start()
 
-    # サイドバー構築
     sidebar = create_sidebar(page, on_nav=navigate_to)
     page.add(ft.Row([sidebar, main_content], expand=True, spacing=0, vertical_alignment=ft.CrossAxisAlignment.START))
 
-    # 初期表示
     models = get_registered_models()
     if models:
         navigate_to(models[0])
