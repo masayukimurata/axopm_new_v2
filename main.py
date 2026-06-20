@@ -23,18 +23,21 @@ def main(page: ft.Page):
     page.padding = 0
 
     main_content = ft.Container(expand=True, padding=20)
-
-    # スレッドキャンセル用のイベント管理変数
     current_cancel_event: Optional[threading.Event] = None
 
-    def navigate_to(model_cls: Type[BaseModel]):
-        nonlocal current_cancel_event
+    # ページ状態を保持する変数
+    current_model_cls: Optional[Type[BaseModel]] = None
+    current_page: int = 0
 
-        # 1. 前回のスレッドをキャンセル
+    def navigate_to(model_cls: Type[BaseModel], page_num: int = 0):
+        nonlocal current_cancel_event, current_model_cls, current_page
+
+        current_model_cls = model_cls
+        current_page = page_num
+
         if current_cancel_event:
             current_cancel_event.set()
 
-        # 2. 新しいイベントを発行
         new_event = threading.Event()
         current_cancel_event = new_event
 
@@ -43,9 +46,7 @@ def main(page: ft.Page):
 
         def background_load():
             try:
-                # DB接続を取得
                 with DatabaseService.connection() as conn:
-                    # キャンセルチェック
                     if new_event.is_set(): return
 
                     if model_cls.__name__ == "Recipe":
@@ -57,9 +58,7 @@ def main(page: ft.Page):
 
                         def on_recipe_selected(r_id: int):
                             total_cost, ingredients = engine.calculate_cost_recursive(conn, r_id)
-                            # キャンセルチェック
                             if new_event.is_set(): return
-
                             cards = [create_ingredient_card(item, lambda *args: None) for item in ingredients]
                             simulator_area.content = ft.Column([
                                 ft.Text(f"原価合計: {total_cost:,.0f} 円", size=24, color=ft.colors.AMBER),
@@ -73,16 +72,19 @@ def main(page: ft.Page):
                             simulator_area
                         ], expand=True)
                     else:
+                        # ページ番号とコールバックを渡して再描画を制御
                         content = ft.Column([
                             ft.Text(getattr(model_cls, "_label", "画面"), size=30, weight=ft.FontWeight.BOLD),
-                            ft.Container(content=create_data_table(model_cls), padding=10)
+                            create_data_table(
+                                model_cls,
+                                current_page=current_page,
+                                on_page_change=lambda p: navigate_to(model_cls, p)
+                            )
                         ], scroll=ft.ScrollMode.AUTO)
 
-                # 最終確認: イベントがセットされていない場合のみUI更新
                 if not new_event.is_set():
                     main_content.content = content
                     page.update()
-
             except Exception as e:
                 if not new_event.is_set():
                     main_content.content = ft.Text(f"エラー: {str(e)}", color=ft.colors.RED)
@@ -90,7 +92,8 @@ def main(page: ft.Page):
 
         threading.Thread(target=background_load, daemon=True).start()
 
-    sidebar = create_sidebar(page, on_nav=navigate_to)
+    # サイドバーは常にページ0から開始
+    sidebar = create_sidebar(page, on_nav=lambda m: navigate_to(m, 0))
     page.add(ft.Row([sidebar, main_content], expand=True, spacing=0, vertical_alignment=ft.CrossAxisAlignment.START))
 
     models = get_registered_models()
